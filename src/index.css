@@ -1,0 +1,5 @@
+html { min-width: 320px; min-height: 100%; }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+#root { min-height: 100vh; }
+::selection { color: #23332d; background: #e4d4a9; }
+:focus-visible { outline: 2px solid #a17d3d; outline-offset: 2px; }
