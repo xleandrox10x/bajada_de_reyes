@@ -276,6 +276,13 @@ td { height: 55px; padding: 9px 13px; color: #7b827a; border-top: 1px solid #efe
 
 .loading-screen { min-height: 100vh; display: grid; align-content: center; justify-items: center; gap: 12px; color: #788179; background: #f5f4ef; font-size: 13px; }
 .loading-screen p { margin: 0; }
+.export-actions, .bulk-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.bulk-actions { padding: 16px 20px; border-bottom: 1px solid #e5e7e2; font-size: 12px; }
+.bulk-actions label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.selection-cell { width: 44px; }
+.selection-cell input, .bulk-actions input { width: 17px; height: 17px; accent-color: #324c3c; cursor: pointer; }
+.button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 650px) { .topbar { flex-wrap: wrap; height: auto; gap: 12px; padding-top: 12px; padding-bottom: 12px; } .export-actions { gap: 8px; } }
 .loading-mark { width: 43px; height: 43px; display: grid; place-items: center; color: #25372d; background: #d7b671; border-radius: 12px; animation: rise-in .45s both; }
 .database-alert { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 20px; padding: 12px 14px; color: #764c30; background: #fbf0e2; border: 1px solid #efddc4; border-radius: 6px; font-size: 12px; line-height: 1.5; }
 .database-alert button { flex: 0 0 auto; padding: 6px 9px; color: #704b2c; background: #fffaf1; border: 1px solid #ead8bd; border-radius: 4px; font-size: 11px; font-weight: 600; }

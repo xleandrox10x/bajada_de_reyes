@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import './App.css'
+import { createChargesPdf } from './lib/pdf'
 
 type View = 'inicio' | 'participantes' | 'animalitos' | 'cargos' | 'historial' | 'recaudado'
 type Participant = { id: string; name: string; createdAt: string }
@@ -310,6 +311,9 @@ function App() {
   const [view, setView] = useState<View>('inicio')
   const [modal, setModal] = useState<Modal>(null)
   const [search, setSearch] = useState('')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
   const [participantPage, setParticipantPage] = useState(1)
   const [animalPage, setAnimalPage] = useState(1)
   const [chargePage, setChargePage] = useState(1)
@@ -374,35 +378,10 @@ function App() {
     return `${participant} ${animal} ${animalCargo} ${charge.observations}`.toLocaleLowerCase('es').includes(search.toLocaleLowerCase('es'))
   })
   const chargePagination = paginate(filteredCharges, chargePage)
-  const filteredHistoryCharges = charges.filter((charge) => {
-    return charge.eventYear === currentEventYear
-  }).map((charge): HistoryEntry => {
-    const participant = participants.find((item) => item.id === charge.participantId)
-    const animal = animals.find((item) => item.id === charge.animalId)
-    return {
-      id: `charge-${charge.id}`,
-      sourceId: charge.id,
-      source: 'charges',
-      participantId: charge.participantId,
-      participantName: participant?.name ?? 'Participante eliminado',
-      animalId: charge.animalId,
-      animalName: animal?.name ?? '',
-      cargo: animal?.name ?? 'Cargo voluntario',
-      detail: charge.observations,
-      eventYear: charge.eventYear,
-      fulfillmentStatus: charge.fulfillmentStatus,
-      createdAt: charge.createdAt,
-    }
-  })
-  const historyEntries: HistoryEntry[] = [
-    ...historicalRecords.map((record): HistoryEntry => ({
-      ...record,
-      source: 'historial',
-      sourceId: record.id,
-      animalName: animals.find((animal) => animal.id === record.animalId)?.name ?? '',
-    })),
-    ...filteredHistoryCharges,
-  ]
+  const historyEntries: HistoryEntry[] = historicalRecords.map((record) => ({
+    ...record, source: 'historial', sourceId: record.id,
+    animalName: animals.find((animal) => animal.id === record.animalId)?.name ?? record.cargo,
+  }))
   const filteredHistory = historyEntries.filter((entry) => {
     if (historyYearFilter !== 'Todos' && entry.eventYear !== Number(historyYearFilter)) return false
     return `${entry.participantName} ${entry.cargo} ${entry.animalName} ${entry.detail}`.toLocaleLowerCase('es').includes(search.toLocaleLowerCase('es'))
@@ -534,18 +513,7 @@ function App() {
     closeModal()
   }
 
-  async function updateFulfillmentStatus(charge: Charge, fulfillmentStatus: FulfillmentStatus) {
-    if (!supabase) return setDatabaseError('Supabase no está configurado.')
-    const { error } = await supabase.from('charges').update({ fulfillment_status: fulfillmentStatus }).eq('id', charge.id)
-    if (error) return setDatabaseError(errorMessage(error))
-    setCharges((items) => items.map((item) => item.id === charge.id ? { ...item, fulfillmentStatus } : item))
-  }
-
   async function updateHistoryFulfillmentStatus(entry: HistoryEntry, fulfillmentStatus: FulfillmentStatus) {
-    if (entry.source === 'charges') {
-      await updateFulfillmentStatus(charges.find((charge) => charge.id === entry.sourceId)!, fulfillmentStatus)
-      return
-    }
     if (!supabase) return setDatabaseError('Supabase no está configurado.')
     const { error } = await supabase.from('historial').update({ fulfillment_status: fulfillmentStatus }).eq('id', entry.sourceId)
     if (error) return setDatabaseError(errorMessage(error))
@@ -640,6 +608,77 @@ function App() {
     setCollectedPage(1)
   }
 
+  const tabRows = view === 'participantes' ? participants : view === 'animalitos' ? animals : view === 'cargos' ? currentYearCharges : view === 'historial' ? historyEntries : view === 'recaudado' ? collectedAmounts : []
+  const visibleRows = view === 'participantes' ? filteredParticipants : view === 'animalitos' ? filteredAnimals : view === 'cargos' ? filteredCharges : view === 'historial' ? filteredHistory : collectedAmounts
+  const selectedInTab = tabRows.filter((row) => selectedIds.includes(row.id))
+  function selectionCell(id: string, label: string) {
+    return <td className="selection-cell"><input type="checkbox" aria-label={`Seleccionar ${label}`} checked={selectedIds.includes(id)} onChange={(event) => setSelectedIds((ids) => event.target.checked ? [...ids, id] : ids.filter((item) => item !== id))} /></td>
+  }
+  async function deleteRows(all: boolean) {
+    if (!supabase || isDeleting) return
+    const ids = (all ? tabRows : selectedInTab).map((row) => row.id)
+    if (!ids.length) return
+    if ((view === 'participantes' && charges.some((row) => ids.includes(row.participantId))) || (view === 'animalitos' && charges.some((row) => ids.includes(row.animalId)))) {
+      window.alert('Hay registros con cargos asignados. Elimina o reasigna esos cargos primero. No se eliminó ningún registro.')
+      return
+    }
+    if (!window.confirm(`¿Eliminar ${ids.length} registros de ${pageTitle}${all ? ', incluidos los que no aparecen por los filtros o la paginación' : ' seleccionados'}? Esta acción no se puede deshacer.`)) return
+    const table = view === 'participantes' ? 'participants' : view === 'animalitos' ? 'animals' : view === 'cargos' ? 'charges' : view === 'historial' ? 'historial' : 'collected_amounts'
+    setIsDeleting(true)
+    try {
+      const { error } = await supabase.from(table).delete().in('id', ids)
+      if (error) throw error
+      if (view === 'participantes') {
+        setParticipants((rows) => rows.filter((row) => !ids.includes(row.id)))
+        setCollectedAmounts((rows) => rows.map((row) => row.responsibleId && ids.includes(row.responsibleId) ? { ...row, responsibleId: null } : row))
+        setHistoricalRecords((rows) => rows.map((row) => row.participantId && ids.includes(row.participantId) ? { ...row, participantId: null } : row))
+      }
+      if (view === 'animalitos') {
+        setAnimals((rows) => rows.filter((row) => !ids.includes(row.id)))
+        setHistoricalRecords((rows) => rows.map((row) => row.animalId && ids.includes(row.animalId) ? { ...row, animalId: null } : row))
+      }
+      if (view === 'cargos') setCharges((rows) => rows.filter((row) => !ids.includes(row.id)))
+      if (view === 'historial') setHistoricalRecords((rows) => rows.filter((row) => !ids.includes(row.id)))
+      if (view === 'recaudado') setCollectedAmounts((rows) => rows.filter((row) => !ids.includes(row.id)))
+      // Avoid reimporting deleted records from the legacy local backup.
+      const key = view === 'participantes' ? storageKeys.participants : view === 'animalitos' ? storageKeys.animals : view === 'cargos' ? storageKeys.charges : view === 'recaudado' ? storageKeys.collectedAmounts : null
+      if (key) localStorage.removeItem(key)
+      setSelectedIds([])
+    } catch (error) { setDatabaseError(errorMessage(error)) }
+    finally { setIsDeleting(false) }
+  }
+
+  async function exportPdf() {
+    if (!supabase || isExporting || !currentYearCharges.length) return
+    setIsExporting(true)
+    try {
+      const createdAt = makeTimestamp()
+      const records: HistoricalRecord[] = currentYearCharges.map((charge) => ({
+        id: charge.id, participantId: charge.participantId,
+        participantName: participants.find((row) => row.id === charge.participantId)?.name ?? 'Sin participante',
+        animalId: charge.animalId,
+        cargo: animals.find((row) => row.id === charge.animalId)?.name ?? 'Cargo voluntario',
+        detail: charge.observations, eventYear: charge.eventYear,
+        fulfillmentStatus: charge.fulfillmentStatus, createdAt,
+      }))
+      const pdf = createChargesPdf(currentEventYear, records)
+      const { error } = await supabase.from('historial').upsert(records.map((row) => ({
+        id: row.id, participant_id: row.participantId, participant_name: row.participantName,
+        animal_id: row.animalId, cargo: row.cargo, detail: row.detail, event_year: row.eventYear,
+        fulfillment_status: row.fulfillmentStatus, created_at: row.createdAt,
+      })))
+      if (error) throw error
+      setHistoricalRecords((rows) => [...records, ...rows.filter((row) => !records.some((record) => record.id === row.id))])
+      const url = URL.createObjectURL(pdf)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `bajada-de-reyes-${currentEventYear}.pdf`
+      link.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+    } catch (error) { setDatabaseError(errorMessage(error)) }
+    finally { setIsExporting(false) }
+  }
+
   async function exportWorkbook() {
     const XLSX = await import('@e965/xlsx')
     const workbook = XLSX.utils.book_new()
@@ -705,7 +744,7 @@ function App() {
         <p className="nav-caption">GESTIÓN</p>
         <nav className="main-nav" aria-label="Navegación principal">
           {navigation.map(({ id, label, icon: Icon }) => (
-            <button key={id} type="button" className={`nav-item ${view === id ? 'active' : ''}`} onClick={() => { setView(id); setSearch(''); setParticipantPage(1); setAnimalPage(1); setChargePage(1); setHistoryPage(1); setCollectedPage(1) }}>
+            <button key={id} type="button" className={`nav-item ${view === id ? 'active' : ''}`} onClick={() => { setView(id); setSelectedIds([]); setSearch(''); setParticipantPage(1); setAnimalPage(1); setChargePage(1); setHistoryPage(1); setCollectedPage(1) }}>
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
               {view === id && <ChevronRight className="nav-chevron" size={15} />}
@@ -722,9 +761,10 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="breadcrumb"><span>Familia Mallma</span><span className="breadcrumb-divider">/</span><strong>{pageTitle}</strong></div>
+          <div className="export-actions"><button type="button" className="button button-secondary" onClick={exportPdf} disabled={isExporting || !currentYearCharges.length}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF y guardar historial'}</button>
           <button type="button" className="button button-secondary export-button" onClick={exportWorkbook}>
             <ArrowDownToLine size={17} /> <span>Exportar Excel</span>
-          </button>
+          </button></div>
         </header>
 
         <div className="page-content">
@@ -779,40 +819,45 @@ function App() {
 
           {view === 'participantes' && (
             <section className="panel data-panel">
+              <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar"><div><p className="eyebrow">PADRÓN FAMILIAR</p><h2>{participants.length} {participants.length === 1 ? 'participante' : 'participantes'}</h2></div><SearchBox value={search} onChange={(value) => { setSearch(value); setParticipantPage(1) }} placeholder="Buscar participante" /></div>
-              {filteredParticipants.length ? <><div className="table-wrap"><table><thead><tr><th>Participante</th><th>Fecha de registro</th><th>Cargos</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{participantPagination.items.map((participant) => <tr key={participant.id}><td className="name-cell">{participant.name}</td><td>{formatDate(participant.createdAt)}</td><td>{charges.filter((charge) => charge.participantId === participant.id).length}</td><td><RowActions onEdit={() => openParticipant(participant.id)} onDelete={() => removeParticipant(participant)} /></td></tr>)}</tbody></table></div><Pagination currentPage={participantPagination.currentPage} pageCount={participantPagination.pageCount} totalItems={filteredParticipants.length} label="participantes" onPageChange={setParticipantPage} /></> : <EmptyState icon={UsersRound} title={search ? 'No encontramos coincidencias' : 'Todavía no hay participantes'} detail={search ? 'Prueba con otro nombre.' : 'Agrega a las personas que participarán en la celebración.'} actionLabel={!search ? 'Agregar participante' : undefined} onAction={!search ? () => openParticipant() : undefined} />}
+              {filteredParticipants.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Participante</th><th>Fecha de registro</th><th>Cargos</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{participantPagination.items.map((participant) => <tr key={participant.id}>{selectionCell(participant.id, participant.name)}<td className="name-cell">{participant.name}</td><td>{formatDate(participant.createdAt)}</td><td>{charges.filter((charge) => charge.participantId === participant.id).length}</td><td><RowActions onEdit={() => openParticipant(participant.id)} onDelete={() => removeParticipant(participant)} /></td></tr>)}</tbody></table></div><Pagination currentPage={participantPagination.currentPage} pageCount={participantPagination.pageCount} totalItems={filteredParticipants.length} label="participantes" onPageChange={setParticipantPage} /></> : <EmptyState icon={UsersRound} title={search ? 'No encontramos coincidencias' : 'Todavía no hay participantes'} detail={search ? 'Prueba con otro nombre.' : 'Agrega a las personas que participarán en la celebración.'} actionLabel={!search ? 'Agregar participante' : undefined} onAction={!search ? () => openParticipant() : undefined} />}
             </section>
           )}
 
           {view === 'animalitos' && (
             <section className="panel data-panel">
+              <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar"><div><p className="eyebrow">CATÁLOGO DEL PESEBRE</p><h2>{animals.length} {animals.length === 1 ? 'animalito' : 'animalitos'}</h2></div><SearchBox value={search} onChange={(value) => { setSearch(value); setAnimalPage(1) }} placeholder="Buscar animalito" /></div>
-              {filteredAnimals.length ? <><div className="table-wrap"><table><thead><tr><th>Animalito</th><th>Monto</th><th>Cargo registrado</th><th>Fecha y hora</th><th>Asignaciones</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{animalPagination.items.map((animal) => { const assignmentCount = charges.filter((item) => item.animalId === animal.id).length; return <tr key={animal.id}><td><span className="name-with-icon"><span className="animal-avatar"><PawPrint size={16} /></span><span className="name-cell">{animal.name}</span></span></td><td className="amount-cell">{currency.format(animal.price)}</td><td>{animal.cargo ?? cargoTypes[0]}</td><td>{formatDate(animal.createdAt)}</td><td>{assignmentCount}</td><td><RowActions onEdit={() => openAnimal(animal.id)} onDelete={() => removeAnimal(animal)} /></td></tr> })}</tbody></table></div><Pagination currentPage={animalPagination.currentPage} pageCount={animalPagination.pageCount} totalItems={filteredAnimals.length} label="animalitos" onPageChange={setAnimalPage} /></> : <EmptyState icon={PawPrint} title={search ? 'No encontramos coincidencias' : 'El catálogo está vacío'} detail={search ? 'Prueba con otro nombre o cargo.' : 'Registra los animalitos con su monto y cargo.'} actionLabel={!search ? 'Agregar animalito' : undefined} onAction={!search ? () => openAnimal() : undefined} />}
+              {filteredAnimals.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Animalito</th><th>Monto</th><th>Cargo registrado</th><th>Fecha y hora</th><th>Asignaciones</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{animalPagination.items.map((animal) => { const assignmentCount = charges.filter((item) => item.animalId === animal.id).length; return <tr key={animal.id}>{selectionCell(animal.id, animal.name)}<td><span className="name-with-icon"><span className="animal-avatar"><PawPrint size={16} /></span><span className="name-cell">{animal.name}</span></span></td><td className="amount-cell">{currency.format(animal.price)}</td><td>{animal.cargo ?? cargoTypes[0]}</td><td>{formatDate(animal.createdAt)}</td><td>{assignmentCount}</td><td><RowActions onEdit={() => openAnimal(animal.id)} onDelete={() => removeAnimal(animal)} /></td></tr> })}</tbody></table></div><Pagination currentPage={animalPagination.currentPage} pageCount={animalPagination.pageCount} totalItems={filteredAnimals.length} label="animalitos" onPageChange={setAnimalPage} /></> : <EmptyState icon={PawPrint} title={search ? 'No encontramos coincidencias' : 'El catálogo está vacío'} detail={search ? 'Prueba con otro nombre o cargo.' : 'Registra los animalitos con su monto y cargo.'} actionLabel={!search ? 'Agregar animalito' : undefined} onAction={!search ? () => openAnimal() : undefined} />}
             </section>
           )}
 
           {view === 'cargos' && (
             <section className="panel data-panel">
+              <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar"><div><p className="eyebrow">ASIGNACIONES {currentEventYear}</p><h2>{currentYearCharges.length} {currentYearCharges.length === 1 ? 'cargo registrado' : 'cargos registrados'}</h2></div><SearchBox value={search} onChange={(value) => { setSearch(value); setChargePage(1) }} placeholder="Buscar participante o animalito" /></div>
-              {filteredCharges.length ? <><div className="table-wrap"><table><thead><tr><th>Participante</th><th>Animalito</th><th>Monto</th><th>Cargo registrado</th><th>Observaciones</th><th>Fecha y hora</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{chargePagination.items.map((charge) => { const animal = animals.find((item) => item.id === charge.animalId); return <tr key={charge.id}><td className="name-cell">{participants.find((item) => item.id === charge.participantId)?.name ?? 'Sin participante'}</td><td><span className="animal-tag"><PawPrint size={13} />{animal?.name ?? 'Sin animalito'}</span></td><td className="amount-cell">{currency.format(animal?.price ?? charge.animalPrice)}</td><td>{animal?.cargo ?? cargoTypes[0]}</td><td className="observation-cell" title={charge.observations}>{charge.observations || '—'}</td><td>{formatDate(charge.createdAt)}</td><td><RowActions onEdit={() => openCharge(charge.id)} onDelete={() => removeCharge(charge)} /></td></tr> })}</tbody></table></div><Pagination currentPage={chargePagination.currentPage} pageCount={chargePagination.pageCount} totalItems={filteredCharges.length} label="cargos" onPageChange={setChargePage} /></> : <EmptyState icon={ClipboardList} title={search ? 'No encontramos coincidencias' : 'Aún no hay cargos'} detail={search ? 'Prueba con otro participante o animalito.' : 'Asigna uno o más animalitos a cada participante y agrega las observaciones necesarias.'} actionLabel={!search && participants.length && animals.length ? 'Asignar cargo' : undefined} onAction={!search && participants.length && animals.length ? () => openCharge() : undefined} />}
+              {filteredCharges.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Participante</th><th>Animalito</th><th>Monto</th><th>Cargo registrado</th><th>Observaciones</th><th>Fecha y hora</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{chargePagination.items.map((charge) => { const animal = animals.find((item) => item.id === charge.animalId); return <tr key={charge.id}>{selectionCell(charge.id, 'cargo')}<td className="name-cell">{participants.find((item) => item.id === charge.participantId)?.name ?? 'Sin participante'}</td><td><span className="animal-tag"><PawPrint size={13} />{animal?.name ?? 'Sin animalito'}</span></td><td className="amount-cell">{currency.format(animal?.price ?? charge.animalPrice)}</td><td>{animal?.cargo ?? cargoTypes[0]}</td><td className="observation-cell" title={charge.observations}>{charge.observations || '—'}</td><td>{formatDate(charge.createdAt)}</td><td><RowActions onEdit={() => openCharge(charge.id)} onDelete={() => removeCharge(charge)} /></td></tr> })}</tbody></table></div><Pagination currentPage={chargePagination.currentPage} pageCount={chargePagination.pageCount} totalItems={filteredCharges.length} label="cargos" onPageChange={setChargePage} /></> : <EmptyState icon={ClipboardList} title={search ? 'No encontramos coincidencias' : 'Aún no hay cargos'} detail={search ? 'Prueba con otro participante o animalito.' : 'Asigna uno o más animalitos a cada participante y agrega las observaciones necesarias.'} actionLabel={!search && participants.length && animals.length ? 'Asignar cargo' : undefined} onAction={!search && participants.length && animals.length ? () => openCharge() : undefined} />}
             </section>
           )}
 
           {view === 'historial' && (
             <section className="panel data-panel">
+              <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar history-toolbar"><div><p className="eyebrow">REGISTRO POR AÑO</p><h2>{filteredHistory.length} {filteredHistory.length === 1 ? 'cargo en historial' : 'cargos en historial'}</h2></div><div className="history-filters"><label className="year-filter"><span>Año</span><select value={historyYearFilter} onChange={(event) => { setHistoryYearFilter(event.target.value as 'Todos' | '2026' | '2027'); setHistoryPage(1) }}><option value="Todos">Todos</option><option value="2026">2026</option><option value="2027">2027</option></select></label><SearchBox value={search} onChange={(value) => { setSearch(value); setHistoryPage(1) }} placeholder="Buscar participante o cargo" /></div></div>
-              {filteredHistory.length ? <><div className="table-wrap"><table><thead><tr><th>Año</th><th>Participante</th><th>Cargo</th><th>Animal relacionado</th><th>Observaciones / detalle</th><th>Cumplimiento</th><th>Fecha y hora</th></tr></thead><tbody>{historyPagination.items.map((entry) => <tr key={entry.id}><td>{entry.eventYear}</td><td className="name-cell">{entry.participantName}</td><td>{entry.cargo}</td><td>{entry.animalName || '—'}</td><td className="observation-cell" title={entry.detail}>{entry.detail || '—'}</td><td><select className="fulfillment-select" aria-label={`Cumplimiento de ${entry.participantName}`} value={entry.fulfillmentStatus} onChange={(event) => updateHistoryFulfillmentStatus(entry, event.target.value as FulfillmentStatus)}>{fulfillmentStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></td><td>{formatDate(entry.createdAt)}</td></tr>)}</tbody></table></div><Pagination currentPage={historyPagination.currentPage} pageCount={historyPagination.pageCount} totalItems={filteredHistory.length} label="cargos del historial" onPageChange={setHistoryPage} /></> : <EmptyState icon={History} title={search || historyYearFilter !== 'Todos' ? 'No encontramos cargos' : 'Aún no hay historial'} detail={search || historyYearFilter !== 'Todos' ? 'Prueba con otro año o término de búsqueda.' : 'Los cargos de 2026 y 2027 aparecerán aquí.'} />}
+              {filteredHistory.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Año</th><th>Participante</th><th>Cargo</th><th>Animal relacionado</th><th>Observaciones / detalle</th><th>Cumplimiento</th><th>Fecha y hora</th></tr></thead><tbody>{historyPagination.items.map((entry) => <tr key={entry.id}>{selectionCell(entry.id, 'registro')}<td>{entry.eventYear}</td><td className="name-cell">{entry.participantName}</td><td>{entry.cargo}</td><td>{entry.animalName || '—'}</td><td className="observation-cell" title={entry.detail}>{entry.detail || '—'}</td><td><select className="fulfillment-select" aria-label={`Cumplimiento de ${entry.participantName}`} value={entry.fulfillmentStatus} onChange={(event) => updateHistoryFulfillmentStatus(entry, event.target.value as FulfillmentStatus)}>{fulfillmentStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></td><td>{formatDate(entry.createdAt)}</td></tr>)}</tbody></table></div><Pagination currentPage={historyPagination.currentPage} pageCount={historyPagination.pageCount} totalItems={filteredHistory.length} label="cargos del historial" onPageChange={setHistoryPage} /></> : <EmptyState icon={History} title={search || historyYearFilter !== 'Todos' ? 'No encontramos cargos' : 'Aún no hay historial'} detail={search || historyYearFilter !== 'Todos' ? 'Prueba con otro año o término de búsqueda.' : 'Los cargos se guardan aquí al exportar el PDF.'} />}
             </section>
           )}
 
           {view === 'recaudado' && (
             <section className="panel data-panel collection-panel">
+              <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="collection-total"><div><p className="eyebrow">TOTAL PAGADO</p><strong>{currency.format(totalCollected)}</strong></div><span>{collectedAmounts.length} {collectedAmounts.length === 1 ? 'monto' : 'montos'}</span></div>
               <div className="collection-buttons" aria-label="Registrar monto recaudado">
                 {collectedAmountOptions.map((amount) => <button key={amount} type="button" className="collection-button" onClick={() => recordCollectedAmount(amount)}>{currency.format(amount)}</button>)}
               </div>
               <div className="panel-toolbar"><div><p className="eyebrow">MOVIMIENTOS</p><h2>Montos registrados</h2></div></div>
-              {collectedAmounts.length ? <><div className="table-wrap"><table><thead><tr><th>Monto recaudado</th><th>Estado</th><th>Responsable</th><th>Fecha y hora</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{collectedPagination.items.map((entry) => <tr key={entry.id}><td className="amount-cell">{currency.format(entry.amount)}</td><td><select className={`status-select ${entry.status === 'Pagado' ? 'is-paid' : 'is-pending'}`} aria-label={`Estado de ${currency.format(entry.amount)}`} value={entry.status} onChange={(event) => updateCollectedStatus(entry, event.target.value as CollectionStatus)}><option value="Pagado">Pagado</option><option value="Pendiente">Pendiente</option></select></td><td><button type="button" className="responsible-button" onClick={() => openResponsiblePicker(entry.id)}>{participants.find((participant) => participant.id === entry.responsibleId)?.name ?? 'Elegir participante'}</button></td><td>{formatDate(entry.createdAt)}</td><td><div className="row-actions"><button type="button" className="icon-button danger-action" aria-label={`Eliminar ${currency.format(entry.amount)}`} title="Eliminar" onClick={() => removeCollectedAmount(entry)}><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div><Pagination currentPage={collectedPagination.currentPage} pageCount={collectedPagination.pageCount} totalItems={collectedAmounts.length} label="montos recaudados" onPageChange={setCollectedPage} /></> : <EmptyState icon={CircleDollarSign} title="Aún no hay montos" detail="Pulsa una denominación para registrarla; luego aparecerán en la fila los combos de Estado y Responsable." />}
+              {collectedAmounts.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Monto recaudado</th><th>Estado</th><th>Responsable</th><th>Fecha y hora</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{collectedPagination.items.map((entry) => <tr key={entry.id}>{selectionCell(entry.id, 'registro')}<td className="amount-cell">{currency.format(entry.amount)}</td><td><select className={`status-select ${entry.status === 'Pagado' ? 'is-paid' : 'is-pending'}`} aria-label={`Estado de ${currency.format(entry.amount)}`} value={entry.status} onChange={(event) => updateCollectedStatus(entry, event.target.value as CollectionStatus)}><option value="Pagado">Pagado</option><option value="Pendiente">Pendiente</option></select></td><td><button type="button" className="responsible-button" onClick={() => openResponsiblePicker(entry.id)}>{participants.find((participant) => participant.id === entry.responsibleId)?.name ?? 'Elegir participante'}</button></td><td>{formatDate(entry.createdAt)}</td><td><div className="row-actions"><button type="button" className="icon-button danger-action" aria-label={`Eliminar ${currency.format(entry.amount)}`} title="Eliminar" onClick={() => removeCollectedAmount(entry)}><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div><Pagination currentPage={collectedPagination.currentPage} pageCount={collectedPagination.pageCount} totalItems={collectedAmounts.length} label="montos recaudados" onPageChange={setCollectedPage} /></> : <EmptyState icon={CircleDollarSign} title="Aún no hay montos" detail="Pulsa una denominación para registrarla; luego aparecerán en la fila los combos de Estado y Responsable." />}
             </section>
           )}
         </div>
