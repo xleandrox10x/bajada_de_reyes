@@ -1,5 +1,3 @@
-type PdfRecord = { participantName: string; cargo: string; detail: string; fulfillmentStatus: string }
-
 // PDF standard fonts use WinAnsi. Escape bytes rather than interpolating PDF syntax.
 function pdfText(text: string) {
   return Array.from(text.normalize('NFC')).map((char) => {
@@ -24,12 +22,10 @@ function wrap(text: string, width = 88): string[] {
   return lines
 }
 
-export function createChargesPdf(year: number, records: PdfRecord[]) {
+export function createModulePdf(title: string, headers: (string | number)[], records: (string | number)[][]) {
   const lines = records.flatMap((row, index) => [
-    ...wrap(`${index + 1}. Responsable: ${row.participantName}`),
-    ...wrap(`Animalito / cargo: ${row.cargo}`),
-    ...wrap(`Observaciones: ${row.detail || '-'}`),
-    ...wrap(`Cumplimiento: ${row.fulfillmentStatus}`), '',
+    ...wrap(`Registro ${index + 1}`),
+    ...row.flatMap((value, column) => wrap(`${headers[column]}: ${value === '' ? '-' : value}`)), '',
   ])
   const pages: string[][] = []
   for (let index = 0; index < lines.length; index += 43) pages.push(lines.slice(index, index + 43))
@@ -40,7 +36,7 @@ export function createChargesPdf(year: number, records: PdfRecord[]) {
     '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>',
   ]
   pages.forEach((page, index) => {
-    const stream = `BT /F1 12 Tf 40 800 Td (${pdfText(`Bajada de Reyes - Familia Mallma - ${year}`)}) Tj 0 -22 Td /F1 10 Tf 15 TL\n${page.map((line) => `(${pdfText(line)}) Tj T*`).join('\n')}\nET\nBT /F1 9 Tf 40 35 Td (${pdfText(`Página ${index + 1} de ${pages.length}`)}) Tj ET`
+    const stream = `BT /F1 12 Tf 40 800 Td (${pdfText(`Bajada de Reyes - ${title}`)}) Tj 0 -22 Td /F1 10 Tf 15 TL\n${page.map((line) => `(${pdfText(line)}) Tj T*`).join('\n')}\nET\nBT /F1 9 Tf 40 35 Td (${pdfText(`Página ${index + 1} de ${pages.length}`)}) Tj ET`
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`)
     objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
   })

@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import './App.css'
-import { createChargesPdf } from './lib/pdf'
+import { createModulePdf } from './lib/pdf'
 
 type View = 'inicio' | 'participantes' | 'animalitos' | 'cargos' | 'historial' | 'recaudado'
 type Participant = { id: string; name: string; createdAt: string }
@@ -64,7 +64,7 @@ const currency = new Intl.NumberFormat('es-PE', {
   currency: 'PEN',
 })
 const cargoTypes = ['Voluntario']
-const tablePageSize = 5
+const tablePageSize = 10
 const historicalYear = 2026
 const currentEventYear = 2027
 const fulfillmentStatuses: FulfillmentStatus[] = ['Cumplió', 'En espera', 'No cumplió']
@@ -649,11 +649,11 @@ function App() {
   }
 
   async function exportPdf() {
-    if (!supabase || isExporting || !currentYearCharges.length) return
+    if (isExporting || !exportRows.length) return
     setIsExporting(true)
     try {
       const createdAt = makeTimestamp()
-      const records: HistoricalRecord[] = currentYearCharges.map((charge) => ({
+      const records: HistoricalRecord[] = filteredCharges.map((charge) => ({
         id: charge.id, participantId: charge.participantId,
         participantName: participants.find((row) => row.id === charge.participantId)?.name ?? 'Sin participante',
         animalId: charge.animalId,
@@ -661,40 +661,41 @@ function App() {
         detail: charge.observations, eventYear: charge.eventYear,
         fulfillmentStatus: charge.fulfillmentStatus, createdAt,
       }))
-      const pdf = createChargesPdf(currentEventYear, records)
-      const { error } = await supabase.from('historial').upsert(records.map((row) => ({
-        id: row.id, participant_id: row.participantId, participant_name: row.participantName,
-        animal_id: row.animalId, cargo: row.cargo, detail: row.detail, event_year: row.eventYear,
-        fulfillment_status: row.fulfillmentStatus, created_at: row.createdAt,
-      })))
-      if (error) throw error
-      setHistoricalRecords((rows) => [...records, ...rows.filter((row) => !records.some((record) => record.id === row.id))])
+      const pdf = createModulePdf(pageTitle, exportHeaders, exportRows)
+      if (view === 'cargos') {
+        if (!supabase) throw new Error('Supabase no está configurado.')
+        const { error } = await supabase.from('historial').upsert(records.map((row) => ({
+          id: row.id, participant_id: row.participantId, participant_name: row.participantName,
+          animal_id: row.animalId, cargo: row.cargo, detail: row.detail, event_year: row.eventYear,
+          fulfillment_status: row.fulfillmentStatus, created_at: row.createdAt,
+        })))
+        if (error) throw error
+        setHistoricalRecords((rows) => [...records, ...rows.filter((row) => !records.some((record) => record.id === row.id))])
+      }
       const url = URL.createObjectURL(pdf)
       const link = document.createElement('a')
       link.href = url
-      link.download = `bajada-de-reyes-${currentEventYear}.pdf`
+      link.download = `bajada-de-reyes-${view}-${createdAt.slice(0, 10)}.pdf`
       link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 60000)
     } catch (error) { setDatabaseError(errorMessage(error)) }
     finally { setIsExporting(false) }
   }
 
-  async function exportWorkbook() {
-    const XLSX = await import('@e965/xlsx')
-    const workbook = XLSX.utils.book_new()
+  function getExportData() {
     const sheets: [string, (string | number)[][]][] = [
-      ['Participantes', [['Participante', 'Animalitos a su cargo', 'Total de cargos (S/)', 'Fecha de registro'], ...participants.map((participant) => {
+      ['Participantes', [['Participante', 'Animalitos a su cargo', 'Total de cargos (S/)', 'Fecha de registro'], ...filteredParticipants.map((participant) => {
         const assigned = charges.filter((charge) => charge.participantId === participant.id)
         return [participant.name, assigned.map((charge) => animals.find((item) => item.id === charge.animalId)?.name ?? 'Animalito eliminado').join(', ') || 'Sin asignaciones', assigned.reduce((total, charge) => total + (animals.find((item) => item.id === charge.animalId)?.price ?? charge.animalPrice), 0), formatDate(participant.createdAt)]
       })]],
-      ['Animalitos', [['Animalito', 'Monto (S/)', 'Cargo registrado', 'Fecha de registro', 'Observaciones'], ...animals.map((animal) => [
+      ['Animalitos', [['Animalito', 'Monto (S/)', 'Cargo registrado', 'Fecha de registro', 'Observaciones'], ...filteredAnimals.map((animal) => [
         animal.name,
         animal.price,
         animal.cargo ?? cargoTypes[0],
         formatDate(animal.createdAt),
         charges.filter((charge) => charge.animalId === animal.id).map((charge) => charge.observations.trim()).filter(Boolean).join(' | '),
       ])]],
-      ['Cargos', [['Año', 'Participante', 'Animalito', 'Monto (S/)', 'Cargo registrado', 'Estado', 'Observaciones', 'Fecha y hora'], ...charges.map((charge) => [
+      ['Cargos', [['Año', 'Participante', 'Animalito', 'Monto (S/)', 'Cargo registrado', 'Estado', 'Observaciones', 'Fecha y hora'], ...filteredCharges.map((charge) => [
         charge.eventYear,
         participants.find((item) => item.id === charge.participantId)?.name ?? 'Participante eliminado',
         animals.find((item) => item.id === charge.animalId)?.name ?? 'Animalito eliminado',
@@ -703,6 +704,9 @@ function App() {
         charge.fulfillmentStatus,
         charge.observations,
         formatDate(charge.createdAt),
+      ])]],
+      ['Historial', [['Año', 'Participante', 'Cargo', 'Animal relacionado', 'Observaciones / detalle', 'Cumplimiento', 'Fecha y hora'], ...filteredHistory.map((entry) => [
+        entry.eventYear, entry.participantName, entry.cargo, entry.animalName, entry.detail, entry.fulfillmentStatus, formatDate(entry.createdAt),
       ])]],
       ['Monto recaudado', [['Monto (S/)', 'Estado', 'Responsable', 'Fecha y hora'], ...collectedAmounts.map((item) => [
         item.amount,
@@ -719,13 +723,24 @@ function App() {
         ['Total recaudado (S/)', totalCollected],
       ]],
     ]
-    sheets.forEach(([name, rows]) => {
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), name)
-    })
-    XLSX.writeFile(workbook, `bajada-de-reyes-familia-mallma-${new Date().toISOString().slice(0, 10)}.xlsx`)
+    return sheets.find(([name]) => name === pageTitle)![1]
   }
 
-  const latestCharges = [...charges].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5)
+  const [exportHeaders, ...exportRows] = getExportData()
+
+  async function exportWorkbook() {
+    if (isExporting || !exportRows.length) return
+    setIsExporting(true)
+    try {
+      const XLSX = await import('@e965/xlsx')
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([exportHeaders, ...exportRows]), pageTitle)
+      XLSX.writeFile(workbook, `bajada-de-reyes-${view}-${makeTimestamp().slice(0, 10)}.xlsx`)
+    } catch (error) { setDatabaseError(errorMessage(error)) }
+    finally { setIsExporting(false) }
+  }
+
+  const latestCharges = [...charges].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, tablePageSize)
   const selectedChargeAnimal = animals.find((animal) => animal.id === chargeAnimalId)
 
   if (isLoading) return <div className="loading-screen"><span className="loading-mark"><Sparkles size={21} /></span><p>Conectando con Supabase...</p></div>
@@ -761,8 +776,8 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="breadcrumb"><span>Familia Mallma</span><span className="breadcrumb-divider">/</span><strong>{pageTitle}</strong></div>
-          <div className="export-actions"><button type="button" className="button button-secondary" onClick={exportPdf} disabled={isExporting || !currentYearCharges.length}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF y guardar historial'}</button>
-          <button type="button" className="button button-secondary export-button" onClick={exportWorkbook}>
+          <div className="export-actions"><button type="button" className="button button-secondary export-button" onClick={exportPdf} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}${view === 'cargos' ? ' y guardar en historial' : ''}`}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF'}</button>
+          <button type="button" className="button button-secondary export-button" onClick={exportWorkbook} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}>
             <ArrowDownToLine size={17} /> <span>Exportar Excel</span>
           </button></div>
         </header>
