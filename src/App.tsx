@@ -314,6 +314,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [isDeleting, setIsDeleting] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [isSavingHistory, setIsSavingHistory] = useState(false)
   const [participantPage, setParticipantPage] = useState(1)
   const [animalPage, setAnimalPage] = useState(1)
   const [chargePage, setChargePage] = useState(1)
@@ -648,30 +649,50 @@ function App() {
     finally { setIsDeleting(false) }
   }
 
-  async function exportPdf() {
-    if (isExporting || !exportRows.length) return
-    setIsExporting(true)
+  async function saveChargesToHistory() {
+    if (isSavingHistory || !currentYearCharges.length) return
+    if (!supabase) return setDatabaseError('Supabase no está configurado.')
+    setIsSavingHistory(true)
+    setDatabaseError('')
     try {
-      const createdAt = makeTimestamp()
-      const records: HistoricalRecord[] = filteredCharges.map((charge) => ({
+      const records: HistoricalRecord[] = currentYearCharges.map((charge) => ({
         id: charge.id, participantId: charge.participantId,
         participantName: participants.find((row) => row.id === charge.participantId)?.name ?? 'Sin participante',
         animalId: charge.animalId,
         cargo: animals.find((row) => row.id === charge.animalId)?.name ?? 'Cargo voluntario',
         detail: charge.observations, eventYear: charge.eventYear,
-        fulfillmentStatus: charge.fulfillmentStatus, createdAt,
+        fulfillmentStatus: charge.fulfillmentStatus, createdAt: charge.createdAt,
       }))
-      const pdf = createModulePdf(pageTitle, exportHeaders, exportRows)
-      if (view === 'cargos') {
-        if (!supabase) throw new Error('Supabase no está configurado.')
-        const { error } = await supabase.from('historial').upsert(records.map((row) => ({
+      const { error } = await supabase.from('historial').upsert(records.map((row) => ({
           id: row.id, participant_id: row.participantId, participant_name: row.participantName,
           animal_id: row.animalId, cargo: row.cargo, detail: row.detail, event_year: row.eventYear,
           fulfillment_status: row.fulfillmentStatus, created_at: row.createdAt,
-        })))
-        if (error) throw error
-        setHistoricalRecords((rows) => [...records, ...rows.filter((row) => !records.some((record) => record.id === row.id))])
-      }
+      })), { onConflict: 'id', ignoreDuplicates: true })
+      if (error) throw error
+      const { data, error: readError } = await supabase.from('historial').select('*').in('id', records.map((row) => row.id))
+      if (readError) throw readError
+      if (!data || data.length !== records.length) throw new Error('No se pudo verificar que todos los cargos estén guardados en Historial. Vuelve a intentarlo.')
+      const saved: HistoricalRecord[] = data.map((row) => ({
+        id: row.id, participantId: row.participant_id, participantName: row.participant_name,
+        animalId: row.animal_id, cargo: row.cargo, detail: row.detail,
+        eventYear: row.event_year, fulfillmentStatus: row.fulfillment_status, createdAt: row.created_at,
+      }))
+      setHistoricalRecords((rows) => [...saved, ...rows.filter((row) => !saved.some((record) => record.id === row.id))])
+      setHistoryYearFilter('2027')
+      setHistoryPage(1)
+      setSearch('')
+      setSelectedIds([])
+      setView('historial')
+    } catch (error) { setDatabaseError(errorMessage(error)) }
+    finally { setIsSavingHistory(false) }
+  }
+
+  async function exportPdf() {
+    if (isExporting || !exportRows.length) return
+    setIsExporting(true)
+    try {
+      const createdAt = makeTimestamp()
+      const pdf = createModulePdf(pageTitle, exportHeaders, exportRows)
       const url = URL.createObjectURL(pdf)
       const link = document.createElement('a')
       link.href = url
@@ -776,7 +797,7 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="breadcrumb"><span>Familia Mallma</span><span className="breadcrumb-divider">/</span><strong>{pageTitle}</strong></div>
-          <div className="export-actions"><button type="button" className="button button-secondary export-button" onClick={exportPdf} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}${view === 'cargos' ? ' y guardar en historial' : ''}`}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF'}</button>
+          <div className="export-actions"><button type="button" className="button button-secondary export-button" onClick={exportPdf} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF'}</button>
           <button type="button" className="button button-secondary export-button" onClick={exportWorkbook} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}>
             <ArrowDownToLine size={17} /> <span>Exportar Excel</span>
           </button></div>
@@ -852,6 +873,12 @@ function App() {
             <section className="panel data-panel">
               <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar"><div><p className="eyebrow">ASIGNACIONES {currentEventYear}</p><h2>{currentYearCharges.length} {currentYearCharges.length === 1 ? 'cargo registrado' : 'cargos registrados'}</h2></div><SearchBox value={search} onChange={(value) => { setSearch(value); setChargePage(1) }} placeholder="Buscar participante o animalito" /></div>
+              <div className="history-transfer">
+                <div><strong>Guardar los cargos de {currentEventYear}</strong><p>Incluye todos los registros, aunque tengas una búsqueda activa. Los cargos se conservan aquí y los ya guardados mantienen su cumplimiento en Historial.</p></div>
+                <button type="button" className="button button-primary" onClick={saveChargesToHistory} disabled={isSavingHistory || isDeleting || !currentYearCharges.length}>
+                  <History size={17} />{isSavingHistory ? 'Guardando en Historial…' : `Guardar todos en Historial (${currentYearCharges.length})`}
+                </button>
+              </div>
               {filteredCharges.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Participante</th><th>Animalito</th><th>Monto</th><th>Cargo registrado</th><th>Observaciones</th><th>Fecha y hora</th><th className="actions-heading">Acciones</th></tr></thead><tbody>{chargePagination.items.map((charge) => { const animal = animals.find((item) => item.id === charge.animalId); return <tr key={charge.id}>{selectionCell(charge.id, 'cargo')}<td className="name-cell">{participants.find((item) => item.id === charge.participantId)?.name ?? 'Sin participante'}</td><td><span className="animal-tag"><PawPrint size={13} />{animal?.name ?? 'Sin animalito'}</span></td><td className="amount-cell">{currency.format(animal?.price ?? charge.animalPrice)}</td><td>{animal?.cargo ?? cargoTypes[0]}</td><td className="observation-cell" title={charge.observations}>{charge.observations || '—'}</td><td>{formatDate(charge.createdAt)}</td><td><RowActions onEdit={() => openCharge(charge.id)} onDelete={() => removeCharge(charge)} /></td></tr> })}</tbody></table></div><Pagination currentPage={chargePagination.currentPage} pageCount={chargePagination.pageCount} totalItems={filteredCharges.length} label="cargos" onPageChange={setChargePage} /></> : <EmptyState icon={ClipboardList} title={search ? 'No encontramos coincidencias' : 'Aún no hay cargos'} detail={search ? 'Prueba con otro participante o animalito.' : 'Asigna uno o más animalitos a cada participante y agrega las observaciones necesarias.'} actionLabel={!search && participants.length && animals.length ? 'Asignar cargo' : undefined} onAction={!search && participants.length && animals.length ? () => openCharge() : undefined} />}
             </section>
           )}
@@ -860,7 +887,7 @@ function App() {
             <section className="panel data-panel">
               <div className="bulk-actions"><label><input type="checkbox" aria-label="Seleccionar todos los resultados filtrados" disabled={!visibleRows.length || isDeleting} checked={visibleRows.length > 0 && visibleRows.every((row) => selectedIds.includes(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...visibleRows.map((row) => row.id)])] : selectedIds.filter((id) => !visibleRows.some((row) => row.id === id)))} /> Seleccionar resultados ({visibleRows.length})</label><span>{selectedInTab.length} seleccionados</span><button type="button" className="button button-secondary danger-action" disabled={!selectedInTab.length || isDeleting} onClick={() => deleteRows(false)}>Eliminar seleccionados</button><button type="button" className="button button-secondary danger-action" disabled={!tabRows.length || isDeleting} onClick={() => deleteRows(true)}>Eliminar todos ({tabRows.length})</button></div>
               <div className="panel-toolbar history-toolbar"><div><p className="eyebrow">REGISTRO POR AÑO</p><h2>{filteredHistory.length} {filteredHistory.length === 1 ? 'cargo en historial' : 'cargos en historial'}</h2></div><div className="history-filters"><label className="year-filter"><span>Año</span><select value={historyYearFilter} onChange={(event) => { setHistoryYearFilter(event.target.value as 'Todos' | '2026' | '2027'); setHistoryPage(1) }}><option value="Todos">Todos</option><option value="2026">2026</option><option value="2027">2027</option></select></label><SearchBox value={search} onChange={(value) => { setSearch(value); setHistoryPage(1) }} placeholder="Buscar participante o cargo" /></div></div>
-              {filteredHistory.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Año</th><th>Participante</th><th>Cargo</th><th>Animal relacionado</th><th>Observaciones / detalle</th><th>Cumplimiento</th><th>Fecha y hora</th></tr></thead><tbody>{historyPagination.items.map((entry) => <tr key={entry.id}>{selectionCell(entry.id, 'registro')}<td>{entry.eventYear}</td><td className="name-cell">{entry.participantName}</td><td>{entry.cargo}</td><td>{entry.animalName || '—'}</td><td className="observation-cell" title={entry.detail}>{entry.detail || '—'}</td><td><select className="fulfillment-select" aria-label={`Cumplimiento de ${entry.participantName}`} value={entry.fulfillmentStatus} onChange={(event) => updateHistoryFulfillmentStatus(entry, event.target.value as FulfillmentStatus)}>{fulfillmentStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></td><td>{formatDate(entry.createdAt)}</td></tr>)}</tbody></table></div><Pagination currentPage={historyPagination.currentPage} pageCount={historyPagination.pageCount} totalItems={filteredHistory.length} label="cargos del historial" onPageChange={setHistoryPage} /></> : <EmptyState icon={History} title={search || historyYearFilter !== 'Todos' ? 'No encontramos cargos' : 'Aún no hay historial'} detail={search || historyYearFilter !== 'Todos' ? 'Prueba con otro año o término de búsqueda.' : 'Los cargos se guardan aquí al exportar el PDF.'} />}
+              {filteredHistory.length ? <><div className="table-wrap"><table><thead><tr><th className="selection-cell"><span className="sr-only">Seleccionar</span></th><th>Año</th><th>Participante</th><th>Cargo</th><th>Animal relacionado</th><th>Observaciones / detalle</th><th>Cumplimiento</th><th>Fecha y hora</th></tr></thead><tbody>{historyPagination.items.map((entry) => <tr key={entry.id}>{selectionCell(entry.id, 'registro')}<td>{entry.eventYear}</td><td className="name-cell">{entry.participantName}</td><td>{entry.cargo}</td><td>{entry.animalName || '—'}</td><td className="observation-cell" title={entry.detail}>{entry.detail || '—'}</td><td><select className="fulfillment-select" aria-label={`Cumplimiento de ${entry.participantName}`} value={entry.fulfillmentStatus} onChange={(event) => updateHistoryFulfillmentStatus(entry, event.target.value as FulfillmentStatus)}>{fulfillmentStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></td><td>{formatDate(entry.createdAt)}</td></tr>)}</tbody></table></div><Pagination currentPage={historyPagination.currentPage} pageCount={historyPagination.pageCount} totalItems={filteredHistory.length} label="cargos del historial" onPageChange={setHistoryPage} /></> : <EmptyState icon={History} title={search || historyYearFilter !== 'Todos' ? 'No encontramos cargos' : 'Aún no hay historial'} detail={search || historyYearFilter !== 'Todos' ? 'Prueba con otro año o término de búsqueda.' : 'Guarda los cargos desde el botón Guardar todos en Historial del módulo Cargos.'} />}
             </section>
           )}
 
