@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   ClipboardList,
+  ChartNoAxesCombined,
   History,
   House,
   PawPrint,
@@ -20,8 +21,9 @@ import {
 import { supabase } from './lib/supabase'
 import './App.css'
 import { createModulePdf } from './lib/pdf'
+import Dashboard from './Dashboard'
 
-type View = 'inicio' | 'participantes' | 'animalitos' | 'cargos' | 'historial' | 'recaudado'
+type View = 'inicio' | 'dashboard' | 'participantes' | 'animalitos' | 'cargos' | 'historial' | 'recaudado'
 type Participant = { id: string; name: string; createdAt: string }
 type Animal = { id: string; name: string; price: number; cargo?: string; createdAt: string }
 type CollectionStatus = 'Pagado' | 'Pendiente'
@@ -72,6 +74,7 @@ const collectedAmountOptions = Array.from({ length: 10 }, (_, index) => Number((
 
 const navigation: { id: View; label: string; icon: LucideIcon }[] = [
   { id: 'inicio', label: 'Resumen', icon: House },
+  { id: 'dashboard', label: 'Dashboard', icon: ChartNoAxesCombined },
   { id: 'participantes', label: 'Participantes', icon: UsersRound },
   { id: 'animalitos', label: 'Animalitos', icon: PawPrint },
   { id: 'cargos', label: 'Cargos', icon: ClipboardList },
@@ -704,6 +707,7 @@ function App() {
   }
 
   function getExportData() {
+    if (view === 'dashboard') return [[]]
     const sheets: [string, (string | number)[][]][] = [
       ['Participantes', [['Participante', 'Animalitos a su cargo', 'Total de cargos (S/)', 'Fecha de registro'], ...filteredParticipants.map((participant) => {
         const assigned = charges.filter((charge) => charge.participantId === participant.id)
@@ -744,7 +748,7 @@ function App() {
         ['Total recaudado (S/)', totalCollected],
       ]],
     ]
-    return sheets.find(([name]) => name === pageTitle)![1]
+    return sheets.find(([name]) => name === pageTitle)?.[1] ?? [[]]
   }
 
   const [exportHeaders, ...exportRows] = getExportData()
@@ -797,7 +801,7 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div className="breadcrumb"><span>Familia Mallma</span><span className="breadcrumb-divider">/</span><strong>{pageTitle}</strong></div>
-          <div className="export-actions"><button type="button" className="button button-secondary export-button" onClick={exportPdf} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF'}</button>
+          <div className="export-actions" hidden={view === 'dashboard'}><button type="button" className="button button-secondary export-button" onClick={exportPdf} disabled={view === 'dashboard' || isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}><ArrowDownToLine size={17} />{isExporting ? 'Exportando…' : 'Exportar PDF'}</button>
           <button type="button" className="button button-secondary export-button" onClick={exportWorkbook} disabled={isExporting || !exportRows.length} title={`Exportar ${pageTitle}`}>
             <ArrowDownToLine size={17} /> <span>Exportar Excel</span>
           </button></div>
@@ -809,9 +813,9 @@ function App() {
             <div>
               <p className="eyebrow">CONTROL DE LA CELEBRACIÓN</p>
               <h1>{view === 'inicio' ? 'Bajada de Reyes' : pageTitle}</h1>
-              <p className="heading-subtitle">{view === 'inicio' ? 'Registro y seguimiento de los cargos del pesebre.' : `Administra ${view === 'participantes' ? 'a las personas de la celebración' : view === 'animalitos' ? 'el catálogo, los montos y el tipo de cargo' : view === 'cargos' ? 'las asignaciones de la celebración 2027' : view === 'historial' ? 'los cargos, responsables y cumplimiento por año' : 'los ingresos de la celebración'}.`}</p>
+              <p className="heading-subtitle">{view === 'dashboard' ? 'Explora la participación, los cargos y el cumplimiento de cada celebración.' : view === 'inicio' ? 'Registro y seguimiento de los cargos del pesebre.' : `Administra ${view === 'participantes' ? 'a las personas de la celebración' : view === 'animalitos' ? 'el catálogo, los montos y el tipo de cargo' : view === 'cargos' ? 'las asignaciones de la celebración 2027' : view === 'historial' ? 'los cargos, responsables y cumplimiento por año' : 'los ingresos de la celebración'}.`}</p>
             </div>
-            {view !== 'inicio' && view !== 'recaudado' && view !== 'historial' && (
+            {view !== 'inicio' && view !== 'dashboard' && view !== 'recaudado' && view !== 'historial' && (
               <button
                 type="button"
                 className="button button-primary"
@@ -823,6 +827,8 @@ function App() {
               </button>
             )}
           </section>
+
+          {view === 'dashboard' && <Dashboard participants={participants} animals={animals} charges={charges} historicalRecords={historicalRecords} collectedAmounts={collectedAmounts} isLoading={isLoading} />}
 
           {view === 'inicio' && (
             <>
